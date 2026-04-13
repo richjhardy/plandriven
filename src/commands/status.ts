@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { getRepoRoot, listWorktrees, isBranchMerged } from '../lib/git.js';
 import { loadConfig } from '../lib/config.js';
 import { parsePlan } from '../lib/plan.js';
+import { Tracker } from '../lib/tracker.js';
 
 export async function statusCommand(): Promise<void> {
   const config = loadConfig();
@@ -52,5 +53,25 @@ export async function statusCommand(): Promise<void> {
       }
     }
     console.log('');
+  }
+
+  // Show model performance stats if available
+  try {
+    const tracker = new Tracker(repoRoot);
+    const stats = tracker.getModelStats();
+    tracker.close();
+
+    if (stats.length > 0) {
+      console.log(chalk.bold('  Model Performance (last 30 days)\n'));
+      console.log(chalk.dim('  Model     Plans  Success  Avg time  Retries'));
+      for (const s of stats) {
+        const bar = '█'.repeat(Math.round(s.success_rate * 10)) + '░'.repeat(10 - Math.round(s.success_rate * 10));
+        const avgTime = s.avg_duration > 0 ? `${Math.round(s.avg_duration / 60)}m` : '-';
+        console.log(`  ${s.model.padEnd(10)}${String(s.total_runs).padEnd(7)}${bar} ${Math.round(s.success_rate * 100)}%  ${avgTime.padEnd(10)}${s.retry_rate.toFixed(1)}`);
+      }
+      console.log('');
+    }
+  } catch {
+    // No tracker data yet
   }
 }

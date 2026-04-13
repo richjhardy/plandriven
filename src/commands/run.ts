@@ -16,6 +16,7 @@ import {
   mergePR,
   getCurrentBranch,
 } from '../lib/git.js';
+import { Tracker } from '../lib/tracker.js';
 
 type Mode = 'fire-and-forget' | 'fire-and-review' | 'supervised' | 'manual';
 
@@ -78,6 +79,27 @@ export async function runCommand(
     copyFileSync(claudeMdSrc, join(worktreePath, config.guardrails_file));
   }
 
+  // Track this run
+  let tracker: Tracker | null = null;
+  let runId: number | null = null;
+  try {
+    tracker = new Tracker(repoRoot);
+    const previousRuns = tracker.getRunsForPlan(resolvedPath);
+    const retryCount = previousRuns.filter(r => r.status === 'failure').length;
+    runId = tracker.startRun({
+      plan_file: resolvedPath,
+      plan_title: plan.title,
+      model,
+      mode,
+      started_at: new Date().toISOString(),
+      retry_count: retryCount,
+      branch: branchName,
+      pr_url: null,
+    });
+  } catch {
+    // Tracking is best-effort
+  }
+
   // Build the session prompt
   const sessionPrompt = buildSessionPrompt(plan, resolvedPath);
 
@@ -112,6 +134,9 @@ export async function runCommand(
     }
   } catch (err) {
     console.log(chalk.yellow(`\n  ⚠ Claude session ended: ${err}`));
+    if (tracker && runId) {
+      try { tracker.finishRun(runId, 'failure', undefined, String(err)); } catch {}
+    }
   }
 
   // Post-session: git automation pipeline
@@ -159,6 +184,11 @@ export async function runCommand(
     const prUrl = createPR(plan.title, prBody, baseBranch, worktreePath);
     console.log(chalk.green(`  ✓ PR created: ${prUrl}`));
 
+    // Record success
+    if (tracker && runId) {
+      try { tracker.finishRun(runId, 'success', prUrl); } catch {}
+    }
+
     // Auto-merge if fire-and-forget
     if (autoMerge) {
       try {
@@ -178,6 +208,11 @@ export async function runCommand(
   } catch (err) {
     console.log(chalk.red(`  ✗ PR creation failed: ${err}`));
     console.log(chalk.dim(`  Branch "${branchName}" was pushed. Create PR manually.`));
+  }
+
+  // Close tracker
+  if (tracker) {
+    try { tracker.close(); } catch {}
   }
 
   console.log('');
