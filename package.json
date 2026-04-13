@@ -1,0 +1,29 @@
+{
+  "name": "plandriven",
+  "version": "0.1.0",
+  "description": "Plan-driven AI development for Claude Code — guardrails, execution, and git automation",
+  "bin": {
+    "plandriven": "./bin/plandriven.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src/",
+    "test": "node --test tests/"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai-development",
+    "plan-driven",
+    "guardrails",
+    "worktree",
+    "automation"
+  ],
+  "author": "Dick Hardy",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
