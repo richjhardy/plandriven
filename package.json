@@ -23,6 +23,20 @@
   ],
   "author": "Dick Hardy",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/richjhardy/plandriven.git"
+  },
+  "homepage": "https://github.com/richjhardy/plandriven",
+  "bugs": {
+    "url": "https://github.com/richjhardy/plandriven/issues"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18"
   },
