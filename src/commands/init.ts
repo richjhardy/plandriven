@@ -76,6 +76,7 @@ export async function initCommand(): Promise<void> {
 
   if (guardResult.claudeMd) created.push(config.guardrails_file);
   if (guardResult.hook) created.push('.claude/hooks/pre-tool-use.sh');
+  if (guardResult.settings) created.push('.claude/settings.json');
 
   // 4. Add .worktrees to .gitignore if not present
   const gitignorePath = join(repoRoot, '.gitignore');

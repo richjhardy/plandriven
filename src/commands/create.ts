@@ -1,30 +1,32 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
 import chalk from 'chalk';
-import { loadConfig } from '../lib/config.js';
+import { loadConfig, type Config } from '../lib/config.js';
 import { getRepoRoot } from '../lib/git.js';
 import { triageTask } from '../lib/triage.js';
 import { Tracker } from '../lib/tracker.js';
+import { claudePrint } from '../lib/claude.js';
 
 export async function createCommand(description: string, opts: { model?: string }): Promise<void> {
   const config = loadConfig();
   const repoRoot = getRepoRoot();
 
   // Triage the task
+  console.log(chalk.bold('\n  PlanDriven Create\n'));
+  console.log(chalk.dim(`  Description: ${description}`));
+  console.log(chalk.dim(`  Triaging...\n`));
+
   let modelStats;
   try {
     const tracker = new Tracker(repoRoot);
     modelStats = tracker.getModelStats();
     tracker.close();
   } catch {
-    // No tracker yet — that's fine
+    // No tracker yet
   }
 
-  const triage = triageTask(description, config, modelStats);
+  const triage = await triageTask(description, config, modelStats);
 
-  console.log(chalk.bold('\n  PlanDriven Create\n'));
-  console.log(chalk.dim(`  Description: ${description}`));
   console.log(chalk.dim(`  Complexity:  ${triage.complexity}`));
   console.log(chalk.dim(`  Reasoning:   ${triage.reasoning}`));
   console.log(chalk.dim(`  Author:      ${opts.model || triage.planAuthorModel}`));
@@ -58,10 +60,7 @@ export async function createCommand(description: string, opts: { model?: string 
   console.log(chalk.dim(`  Generating plan with ${authorModel}...\n`));
 
   try {
-    const output = execSync(
-      `claude --model ${authorModel} --print "${prompt.replace(/"/g, '\\"')}"`,
-      { encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 1024 * 1024 },
-    ).trim();
+    const output = claudePrint(prompt, { model: authorModel, cwd: repoRoot });
 
     // Extract markdown content — Claude may wrap in ```markdown blocks
     const planContent = extractMarkdown(output);
@@ -131,13 +130,9 @@ Rules:
 }
 
 function extractMarkdown(output: string): string {
-  // If Claude wrapped the output in a code fence, extract it
   const fenceMatch = output.match(/```(?:markdown)?\n([\s\S]*?)```/);
   if (fenceMatch) {
     return fenceMatch[1].trim() + '\n';
   }
   return output.trim() + '\n';
 }
-
-// Need Config type for the prompt builder
-import type { Config } from '../lib/config.js';

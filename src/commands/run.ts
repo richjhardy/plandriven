@@ -1,6 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, copyFileSync, appendFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
-import { execSync, spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { parsePlan } from '../lib/plan.js';
 import { lintPlan } from '../lib/lint.js';
@@ -14,9 +13,9 @@ import {
   pushBranch,
   createPR,
   mergePR,
-  getCurrentBranch,
 } from '../lib/git.js';
 import { Tracker } from '../lib/tracker.js';
+import { claudePrint, claudeInteractive } from '../lib/claude.js';
 
 type Mode = 'fire-and-forget' | 'fire-and-review' | 'supervised' | 'manual';
 
@@ -73,11 +72,8 @@ export async function runCommand(
     process.exit(1);
   }
 
-  // Copy CLAUDE.md into worktree if it exists
-  const claudeMdSrc = join(repoRoot, config.guardrails_file);
-  if (existsSync(claudeMdSrc)) {
-    copyFileSync(claudeMdSrc, join(worktreePath, config.guardrails_file));
-  }
+  // Prepare CLAUDE.md in worktree — guardrails + plan context
+  prepareWorktreeContext(repoRoot, worktreePath, plan, config);
 
   // Track this run
   let tracker: Tracker | null = null;
@@ -100,37 +96,17 @@ export async function runCommand(
     // Tracking is best-effort
   }
 
-  // Build the session prompt
-  const sessionPrompt = buildSessionPrompt(plan, resolvedPath);
-
   // Run Claude Code
   console.log(chalk.dim(`  Launching Claude Code (${headless ? 'headless' : 'interactive'})...\n`));
 
   try {
     if (headless) {
-      execSync(
-        `claude --model ${model} --print "${sessionPrompt.replace(/"/g, '\\"')}"`,
-        { cwd: worktreePath, stdio: 'inherit', encoding: 'utf-8' },
-      );
+      const sessionPrompt = buildSessionPrompt(plan);
+      claudePrint(sessionPrompt, { model, cwd: worktreePath, inheritStdio: true });
     } else {
-      // Interactive mode — spawn with inherited stdio
-      const child = spawn('claude', ['--model', model], {
-        cwd: worktreePath,
-        stdio: 'inherit',
-        shell: true,
-      });
-
-      // Send the session prompt as initial input
-      await new Promise<void>((resolve, reject) => {
-        child.on('close', (code) => {
-          if (code !== 0 && code !== null) {
-            reject(new Error(`Claude exited with code ${code}`));
-          } else {
-            resolve();
-          }
-        });
-        child.on('error', reject);
-      });
+      // Interactive: CLAUDE.md already has the plan context.
+      // Claude reads it on startup — the user drives the session.
+      await claudeInteractive({ model, cwd: worktreePath });
     }
   } catch (err) {
     console.log(chalk.yellow(`\n  ⚠ Claude session ended: ${err}`));
@@ -150,12 +126,14 @@ export async function runCommand(
     } catch {
       console.log(chalk.dim(`  ⚠ Clean up worktree manually: ${worktreePath}\n`));
     }
+    if (tracker) { try { tracker.close(); } catch {} }
     return;
   }
 
   if (mode === 'manual') {
     console.log(chalk.dim('  Manual mode — skipping git automation.'));
     console.log(chalk.dim(`  Worktree: ${worktreePath}\n`));
+    if (tracker) { try { tracker.close(); } catch {} }
     return;
   }
 
@@ -166,6 +144,7 @@ export async function runCommand(
     console.log(chalk.green('  ✓ Changes committed'));
   } catch (err) {
     console.log(chalk.red(`  ✗ Commit failed: ${err}`));
+    if (tracker) { try { tracker.close(); } catch {} }
     return;
   }
 
@@ -175,6 +154,7 @@ export async function runCommand(
     console.log(chalk.green('  ✓ Branch pushed'));
   } catch (err) {
     console.log(chalk.red(`  ✗ Push failed: ${err}`));
+    if (tracker) { try { tracker.close(); } catch {} }
     return;
   }
 
@@ -184,18 +164,14 @@ export async function runCommand(
     const prUrl = createPR(plan.title, prBody, baseBranch, worktreePath);
     console.log(chalk.green(`  ✓ PR created: ${prUrl}`));
 
-    // Record success
     if (tracker && runId) {
       try { tracker.finishRun(runId, 'success', prUrl); } catch {}
     }
 
-    // Auto-merge if fire-and-forget
     if (autoMerge) {
       try {
         mergePR(prUrl, worktreePath);
         console.log(chalk.green('  ✓ PR merged (squash)'));
-
-        // Clean up worktree
         removeWorktree(repoRoot, worktreePath);
         console.log(chalk.green('  ✓ Worktree cleaned up'));
       } catch (err) {
@@ -210,16 +186,49 @@ export async function runCommand(
     console.log(chalk.dim(`  Branch "${branchName}" was pushed. Create PR manually.`));
   }
 
-  // Close tracker
-  if (tracker) {
-    try { tracker.close(); } catch {}
-  }
-
+  if (tracker) { try { tracker.close(); } catch {} }
   console.log('');
 }
 
-function buildSessionPrompt(plan: ReturnType<typeof parsePlan>, planPath: string): string {
-  const lines = [
+/**
+ * Write CLAUDE.md into the worktree with guardrails + plan context.
+ * For interactive mode, this is how the plan reaches Claude — it reads
+ * CLAUDE.md on startup. For headless mode, this is a safety net.
+ */
+function prepareWorktreeContext(
+  repoRoot: string,
+  worktreePath: string,
+  plan: ReturnType<typeof parsePlan>,
+  config: ReturnType<typeof loadConfig>,
+): void {
+  const claudeMdPath = join(worktreePath, config.guardrails_file);
+
+  // Start with guardrails from the repo if they exist
+  const srcPath = join(repoRoot, config.guardrails_file);
+  if (existsSync(srcPath)) {
+    copyFileSync(srcPath, claudeMdPath);
+  }
+
+  // Append plan context so Claude has it on startup
+  const planSection = [
+    '',
+    '---',
+    '',
+    '# Active Plan',
+    '',
+    `You are executing a PlanDriven plan: **${plan.title}**`,
+    '',
+    'Follow the plan below exactly. Stay within the declared scope.',
+    'If you must deviate, output: DEVIATION_REQUIRED: <reason>',
+    '',
+    plan.raw,
+  ].join('\n');
+
+  appendFileSync(claudeMdPath, planSection);
+}
+
+function buildSessionPrompt(plan: ReturnType<typeof parsePlan>): string {
+  return [
     `You are executing a PlanDriven plan: "${plan.title}"`,
     '',
     'Follow the plan below exactly. Stay within the declared scope.',
@@ -228,9 +237,7 @@ function buildSessionPrompt(plan: ReturnType<typeof parsePlan>, planPath: string
     '---',
     '',
     plan.raw,
-  ];
-
-  return lines.join('\n');
+  ].join('\n');
 }
 
 function buildPRBody(plan: ReturnType<typeof parsePlan>, model: string, mode: string): string {
@@ -239,7 +246,7 @@ function buildPRBody(plan: ReturnType<typeof parsePlan>, model: string, mode: st
     ...plan.scope.modifiedFiles.map(f => `- \`${f}\` (modified)`),
   ];
 
-  const lines = [
+  return [
     `## ${plan.title}`,
     '',
     plan.objective,
@@ -254,7 +261,5 @@ function buildPRBody(plan: ReturnType<typeof parsePlan>, model: string, mode: st
     '',
     '---',
     '_Generated by [PlanDriven](https://github.com/richjhardy/plandriven)_',
-  ];
-
-  return lines.join('\n');
+  ].join('\n');
 }

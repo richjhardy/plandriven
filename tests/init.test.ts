@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execSync } from 'node:child_process';
 import { installGuardrails } from '../dist/lib/guardrails.js';
 import { loadConfig } from '../dist/lib/config.js';
 
@@ -25,6 +24,7 @@ describe('init scaffolding', () => {
 
     assert.equal(result.claudeMd, true);
     assert.equal(result.hook, true);
+    assert.equal(result.settings, true);
 
     // CLAUDE.md exists and has content
     const claudeMd = join(testDir, 'CLAUDE.md');
@@ -38,5 +38,13 @@ describe('init scaffolding', () => {
     assert.ok(existsSync(hook));
     const hookContent = readFileSync(hook, 'utf-8');
     assert.ok(hookContent.startsWith('#!/usr/bin/env bash'));
+    assert.ok(hookContent.includes('jq'));
+
+    // settings.json exists and registers hooks
+    const settings = join(testDir, '.claude', 'settings.json');
+    assert.ok(existsSync(settings));
+    const settingsContent = JSON.parse(readFileSync(settings, 'utf-8'));
+    assert.ok(settingsContent.hooks);
+    assert.ok(settingsContent.hooks.PreToolUse);
   });
 });

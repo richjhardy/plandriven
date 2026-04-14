@@ -37,19 +37,31 @@ export function generateClaudeMd(repoRoot: string, config: Config): string {
 }
 
 /**
- * Generate the pre-tool-use hook script that enforces guardrails.
+ * Generate the pre-tool-use hook script.
+ * Reads JSON from stdin (Claude Code hook protocol), parses with jq.
  */
 export function generateHookScript(config: Config): string {
-  const protectedPatterns = config.protected_paths.map(p => `  "${p}"`).join('\n');
+  const protectedPatterns = config.protected_paths.map(p => `    "${p}"`).join('\n');
 
   return `#!/usr/bin/env bash
 # PlanDriven guardrails hook — validates tool calls before execution
 # Installed by: plandriven init
+# Protocol: receives JSON on stdin, exit 0 to allow, exit 2 to block
 
 set -euo pipefail
 
-TOOL_NAME="\${CLAUDE_TOOL_NAME:-}"
-TOOL_INPUT="\${CLAUDE_TOOL_INPUT:-}"
+# Read JSON from stdin (Claude Code hook protocol)
+INPUT=$(cat)
+
+# Check if jq is available
+if ! command -v jq &> /dev/null; then
+  # Can't validate without jq — allow and warn
+  echo "Warning: jq not installed, guardrails hook cannot validate" >&2
+  exit 0
+fi
+
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // empty')
 
 # Protected path patterns
 PROTECTED_PATTERNS=(
@@ -58,28 +70,31 @@ ${protectedPatterns}
 
 # Check if a file path matches any protected pattern
 check_protected() {
-  local file_path="\$1"
+  local file_path="$1"
+  # Get just the relative path (strip any leading project dir)
+  local rel_path
+  rel_path=$(echo "$file_path" | sed "s|^$(echo "$INPUT" | jq -r '.cwd // empty')/||")
+
   for pattern in "\${PROTECTED_PATTERNS[@]}"; do
-    if [[ "\$file_path" == \$pattern ]]; then
-      echo "BLOCKED: Cannot modify protected path: \$file_path (matches \$pattern)"
+    # Use bash glob matching
+    if [[ "$rel_path" == $pattern ]] || [[ "$file_path" == $pattern ]]; then
+      echo "BLOCKED: Cannot modify protected path: $rel_path (matches $pattern)" >&2
       exit 2
     fi
   done
 }
 
-# Check write operations against protected paths
-case "\$TOOL_NAME" in
+case "$TOOL_NAME" in
   Write|Edit)
-    file_path=\$(echo "\$TOOL_INPUT" | grep -o '"file_path"\\s*:\\s*"[^"]*"' | head -1 | sed 's/.*"file_path"\\s*:\\s*"\\([^"]*\\)".*/\\1/')
-    if [ -n "\$file_path" ]; then
-      check_protected "\$file_path"
+    file_path=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+    if [ -n "$file_path" ]; then
+      check_protected "$file_path"
     fi
     ;;
   Bash)
-    command=\$(echo "\$TOOL_INPUT" | grep -o '"command"\\s*:\\s*"[^"]*"' | head -1 | sed 's/.*"command"\\s*:\\s*"\\([^"]*\\)".*/\\1/')
-    # Block destructive commands
-    if echo "\$command" | grep -qE '(rm\\s+-rf\\s+/|mv\\s+/|chmod\\s+777|git\\s+push\\s+--force)'; then
-      echo "BLOCKED: Destructive command not allowed: \$command"
+    command=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+    if echo "$command" | grep -qE '(rm\\s+-rf\\s+/|mv\\s+/|chmod\\s+777|git\\s+push\\s+--force)'; then
+      echo "BLOCKED: Destructive command not allowed: $command" >&2
       exit 2
     fi
     ;;
@@ -90,10 +105,31 @@ exit 0
 }
 
 /**
+ * Generate .claude/settings.json to register the hook with Claude Code.
+ */
+export function generateSettingsJson(): Record<string, unknown> {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash|Edit|Write',
+          hooks: [
+            {
+              type: 'command',
+              command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/pre-tool-use.sh',
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
  * Write all guardrails files to the project.
  */
-export function installGuardrails(repoRoot: string, config: Config): { claudeMd: boolean; hook: boolean } {
-  const result = { claudeMd: false, hook: false };
+export function installGuardrails(repoRoot: string, config: Config): { claudeMd: boolean; hook: boolean; settings: boolean } {
+  const result = { claudeMd: false, hook: false, settings: false };
 
   // Write CLAUDE.md
   const claudeMdPath = join(repoRoot, config.guardrails_file);
@@ -101,7 +137,7 @@ export function installGuardrails(repoRoot: string, config: Config): { claudeMd:
   writeFileSync(claudeMdPath, claudeMdContent);
   result.claudeMd = true;
 
-  // Write hook
+  // Write hook script
   const hookDir = join(repoRoot, '.claude', 'hooks');
   mkdirSync(hookDir, { recursive: true });
 
@@ -109,6 +145,24 @@ export function installGuardrails(repoRoot: string, config: Config): { claudeMd:
   const hookContent = generateHookScript(config);
   writeFileSync(hookPath, hookContent, { mode: 0o755 });
   result.hook = true;
+
+  // Write .claude/settings.json to register hooks with Claude Code
+  const settingsPath = join(repoRoot, '.claude', 'settings.json');
+  const settings = generateSettingsJson();
+
+  if (existsSync(settingsPath)) {
+    // Merge with existing settings
+    try {
+      const existing = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      existing.hooks = (settings as Record<string, unknown>).hooks;
+      writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + '\n');
+    } catch {
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+    }
+  } else {
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  }
+  result.settings = true;
 
   return result;
 }
